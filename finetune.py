@@ -86,12 +86,17 @@ class Workspace:
                                                 cfg.replay_buffer_num_workers,
                                                 False, cfg.nstep, cfg.discount)
         self._replay_iter = None
-
+        
         # create video recorders
+        domain, _ = self.cfg.task.split('_', 1)
         self.video_recorder = VideoRecorder(
-            self.work_dir if cfg.save_video else None)
+            self.work_dir if cfg.save_video else None,
+            camera_id= 0 if 'quadruped' not in domain else 2,
+            use_wandb=self.cfg.use_wandb)
         self.train_video_recorder = TrainVideoRecorder(
-            self.work_dir if cfg.save_train_video else None)
+            self.work_dir if cfg.save_train_video else None,
+            camera_id= 0 if 'quadruped' not in domain else 2,
+            use_wandb=self.cfg.use_wandb)
 
         self.timer = utils.Timer()
         self._global_step = 0
@@ -223,12 +228,17 @@ class Workspace:
     def load_snapshot(self):
         snapshot_base_dir = Path(self.cfg.snapshot_base_dir)
         domain, _ = self.cfg.task.split('_', 1)
-        snapshot_dir = snapshot_base_dir / self.cfg.obs_type / domain / self.cfg.agent.name
         
-        if self.cfg.snapshot_name != 'none':
-            snapshot = snapshot_dir / f'snapshot_{self.cfg.snapshot_ts}_{self.cfg.snapshot_name}.pt'
+        # Special case for cic_hrl agent, which loads from pretrained cic
+        if self.cfg.agent.name == "cic_hrl":
+            snapshot = snapshot_base_dir / self.cfg.obs_type / domain / "cic" / f"{domain}_pretrain" / f"snapshot_{self.cfg.snapshot_ts}_{domain}_pretrain.pt"
         else:
-            snapshot = snapshot_dir / f'snapshot_{self.cfg.snapshot_ts}.pt'
+            snapshot_dir = snapshot_base_dir / self.cfg.obs_type / domain / self.cfg.agent.name
+            
+            if self.cfg.snapshot_name != 'none':
+                snapshot = snapshot_dir / f'snapshot_{self.cfg.snapshot_ts}_{self.cfg.snapshot_name}.pt'
+            else:
+                snapshot = snapshot_dir / f'snapshot_{self.cfg.snapshot_ts}.pt'
 
         with snapshot.open('rb') as f:
             payload = torch.load(f)
