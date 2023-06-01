@@ -10,6 +10,7 @@ os.environ['MUJOCO_GL'] = 'egl'
 from pathlib import Path
 
 import hydra
+from omegaconf import OmegaConf
 import numpy as np
 import torch
 from dm_env import specs
@@ -44,7 +45,10 @@ class Workspace:
         # create logger
         if cfg.use_wandb:
             exp_name = '_'.join([cfg.experiment,cfg.agent.name,cfg.task,cfg.obs_type,str(cfg.seed)])
-            wandb.init(project="cic_icml",group=cfg.agent.name + '-ft',name=exp_name)
+            config = OmegaConf.to_container(
+                cfg, resolve=True, throw_on_missing=False
+            )
+            wandb.init(project="cic_icml",group=cfg.agent.name + '-ft',name=exp_name,config=config)
 
         # create logger
         self.logger = Logger(self.work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)

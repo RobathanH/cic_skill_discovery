@@ -62,7 +62,7 @@ class SkillSelector(nn.Module):
         skill = samples @ self.skill_vocab
         
         if return_logits:
-            return skill, logits
+            return logits
         else:
             return skill
         
@@ -84,7 +84,10 @@ class CICHRLAgent:
     def __init__(self, name, skill_vocab_size, skill_dim,
                  skill_entropy_coef,
                  obs_type, obs_shape, action_shape,
-                 device, lr, feature_dim, hidden_dim, critic_target_tau,
+                 device, lr,
+                 feature_dim, hidden_dim,
+                 pretrained_feature_dim, pretrained_hidden_dim,
+                 critic_target_tau,
                  num_expl_steps, update_every_steps, stddev_schedule,
                  nstep, batch_size, stddev_clip, use_tb, use_wandb):
         self.skill_vocab_size = skill_vocab_size
@@ -125,7 +128,7 @@ class CICHRLAgent:
         
         # Low-Level actor includes skill in input - this is what we load from pretraining
         self.actor = Actor(obs_type, self.obs_dim + skill_dim, self.action_dim,
-                           feature_dim, hidden_dim).to(device)
+                           pretrained_feature_dim, pretrained_hidden_dim).to(device)
 
         # Critic operates on low-level observations and continuous actions, but no skill info
         # TODO: Compare difference with skill input as well
@@ -227,12 +230,23 @@ class CICHRLAgent:
     def update_actor(self, obs, step):
         metrics = dict()
         
-        skills, selection_logits = self.skill_selector(obs, return_logits=True)
+        selection_logits = self.skill_selector(obs, return_logits=True)
+        skill_probs = torch.softmax(selection_logits, dim=-1)
+
+        # Compute action and action-value for each possible skill on each observation
+        obs = obs[:, None, :].expand(-1, self.skill_vocab_size, -1) # (bsz, skill_vocab, obs_dim)
+        skills = self.skill_selector.skill_vocab[None, :, :].expand(obs.size(0), -1, -1) # (bsz, skill_vocab, skill_dim)
+        obs = obs.flatten(end_dim=1)
+        skills = skills.flatten(end_dim=1)
         dist = self.compute_action_dist(obs, skills, step)
         action = dist.sample(clip=self.stddev_clip)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
+        Q = Q.reshape(-1, self.skill_vocab_size)
+
+        # Take expectation of value over skills
+        Q = (skill_probs * Q).sum(-1)
 
         actor_loss = -Q.mean()
         

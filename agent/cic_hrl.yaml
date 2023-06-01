@@ -15,6 +15,8 @@ use_wandb: ${use_wandb}
 num_expl_steps: 2000
 hidden_dim: 1024
 feature_dim: 1024
+pretrained_hidden_dim: 1024
+pretrained_feature_dim: 1024
 stddev_schedule: 0.2
 stddev_clip: 0.3
 skill_dim: 64
