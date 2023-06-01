@@ -250,8 +250,8 @@ class CICHRLAgent:
 
         actor_loss = -Q.mean()
         
-        # Add skill entropy term
-        skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean()
+        # Add normalized skill entropy term
+        skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean() / torch.log(self.skill_vocab_size)
         actor_loss -= self.skill_entropy_coef * skill_entropy
 
         # optimize skill selector
