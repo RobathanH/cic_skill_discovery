@@ -323,6 +323,7 @@ class CICHRLAgent:
             metrics['actor_logprob'] = log_prob.mean().item()
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
             metrics["skill_selector_entropy"] = skill_entropy.item()
+            metrics["max_skill_prob"] = skill_probs.max(-1).values.mean().item()
             metrics["skill_vocab_similarity"] = self.skill_selector.compute_skill_vocab_similarity().item()
 
         return metrics
