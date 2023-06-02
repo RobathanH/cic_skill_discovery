@@ -23,48 +23,59 @@ Use Critic networks in DDPGAgent, predicting value from ground-truth continuous 
 """
 
 class SkillSelector(nn.Module):
-    def __init__(self, skill_vocab_size, skill_dim, obs_type, obs_dim, feature_dim, hidden_dim):
+    def __init__(self, skill_vocab_size, skill_dim, obs_type, obs_dim, feature_dim, hidden_dim,
+                 skill_vocab_trainable, skill_selector_is_policy):
         super().__init__()
+        
+        self.skill_selector_is_policy = skill_selector_is_policy
         
         # Parameters representing the skill vector for each action
         skill_vocab = torch.rand(skill_vocab_size, skill_dim)
-        self.skill_vocab = nn.Parameter(skill_vocab, requires_grad=True)
+        self.skill_vocab = nn.Parameter(skill_vocab, requires_grad=skill_vocab_trainable)
         
-        # High-Level skill-selection network (same architecture as ddpg.Agent)
-        self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
-        
-        policy_layers = []
-        policy_layers += [
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(inplace=True)
-        ]
-        # add additional hidden layer for pixels
-        if obs_type == 'pixels':
+        if self.skill_selector_is_policy:
+            # High-Level skill-selection network (same architecture as ddpg.Agent)
+            self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
+                                    nn.LayerNorm(feature_dim), nn.Tanh())
+            
+            policy_layers = []
             policy_layers += [
-                nn.Linear(hidden_dim, hidden_dim),
+                nn.Linear(feature_dim, hidden_dim),
                 nn.ReLU(inplace=True)
             ]
-        policy_layers += [nn.Linear(hidden_dim, skill_vocab_size)]
+            # add additional hidden layer for pixels
+            if obs_type == 'pixels':
+                policy_layers += [
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(inplace=True)
+                ]
+            policy_layers += [nn.Linear(hidden_dim, skill_vocab_size)]
 
-        self.policy = nn.Sequential(*policy_layers)
+            self.policy = nn.Sequential(*policy_layers)
+        
+        else:
+            # Learn fixed skill selection probabilities that ignore input state
+            self.logits = nn.Parameter(torch.zeros(skill_vocab_size), requires_grad=True)
 
         self.apply(utils.weight_init)
         
     def forward(self, obs, return_logits=False):
         """
-        Samples a single skill vector from vocab using gumbel softmax.
-        Can also return the skill selection logits for metrics, etc
+        Computes logits for a categorical distribution over the skill vocab
         """
-        h = self.trunk(obs)
-        logits = self.policy(h)
-        samples = F.gumbel_softmax(logits, hard=True, dim=-1)
-        skill = samples @ self.skill_vocab
+        if self.skill_selector_is_policy:
+            h = self.trunk(obs)
+            logits = self.policy(h)
+        else:
+            logits = self.logits[None, :].expand(obs.size(0), -1)
         
         if return_logits:
             return logits
-        else:
-            return skill
+        
+        dist = torch.distributions.Categorical(logits=logits)
+        samples = dist.sample()
+        skills = self.skill_vocab[samples]
+        return skills
         
     def compute_skill_vocab_similarity(self):
         """
@@ -82,7 +93,8 @@ class SkillSelector(nn.Module):
 
 class CICHRLAgent:
     def __init__(self, name, skill_vocab_size, skill_dim,
-                 skill_entropy_coef,
+                 skill_entropy_coef, skill_selector_is_policy,
+                 skill_vocab_trainable, actor_trainable,
                  obs_type, obs_shape, action_shape,
                  device, lr,
                  feature_dim, hidden_dim,
@@ -93,6 +105,8 @@ class CICHRLAgent:
         self.skill_vocab_size = skill_vocab_size
         self.skill_dim = skill_dim
         self.skill_entropy_coef = skill_entropy_coef
+        self.skill_vocab_trainable = skill_vocab_trainable
+        self.actor_trainable = actor_trainable
         
         self.obs_type = obs_type
         self.action_dim = action_shape[0]
@@ -123,8 +137,8 @@ class CICHRLAgent:
         
         # High-Level skill vocab trainer and selection policy
         self.skill_selector = SkillSelector(skill_vocab_size, skill_dim, obs_type,
-                                            self.obs_dim, feature_dim,
-                                            hidden_dim).to(device)
+                                            self.obs_dim, feature_dim, hidden_dim,
+                                            skill_vocab_trainable, skill_selector_is_policy).to(device)
         
         # Low-Level actor includes skill in input - this is what we load from pretraining
         self.actor = Actor(obs_type, self.obs_dim + skill_dim, self.action_dim,
@@ -138,7 +152,7 @@ class CICHRLAgent:
                                     feature_dim, hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        # Optimizers (none for Actor, which is frozen)
+        # Optimizers
         self.selector_opt = torch.optim.Adam(self.skill_selector.parameters(), lr=lr)
         
         if obs_type == 'pixels':
@@ -146,6 +160,11 @@ class CICHRLAgent:
         else:
             self.encoder_opt = None
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
+        
+        if actor_trainable:
+            self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        else:
+            self.actor_opt = None
         
         self.train()
         
@@ -251,13 +270,17 @@ class CICHRLAgent:
         actor_loss = -Q.mean()
         
         # Add normalized skill entropy term
-        skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean() / torch.log(self.skill_vocab_size)
+        skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean() / math.log(self.skill_vocab_size)
         actor_loss -= self.skill_entropy_coef * skill_entropy
 
         # optimize skill selector
         self.selector_opt.zero_grad(set_to_none=True)
+        if self.actor_trainable:
+            self.actor_opt.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.selector_opt.step()
+        if self.actor_trainable:
+            self.actor_opt.step()
 
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss.item()
