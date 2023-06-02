@@ -169,7 +169,7 @@ class CICAgent(DDPGAgent):
                 # If grid sweep is finished, set fixed grid skill based on max expl_return
                 if (step + 1) == self.expl_steps_per_grid_skill * self.finetune_grid_skill_count:
                     self.grid_skill_ind = np.argmax(self.expl_return_per_grid_skill)
-                    print(f"Finetuning done: best skill has mean: {self.grid_skills[self.grid_skill_ind].mean()}")
+                    print(f"Grid sweep done: best skill has mean: {self.grid_skills[self.grid_skill_ind].mean()}")
                     return self.init_meta()
                 
                 # Update grid skill level periodically

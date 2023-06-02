@@ -95,6 +95,7 @@ class CICHRLAgent:
     def __init__(self, name, skill_vocab_size, skill_dim,
                  skill_entropy_coef, skill_selector_is_policy,
                  skill_vocab_trainable, actor_trainable,
+                 grid_search_skill_init, grid_search_skill_count,
                  obs_type, obs_shape, action_shape,
                  device, lr,
                  feature_dim, hidden_dim,
@@ -107,6 +108,8 @@ class CICHRLAgent:
         self.skill_entropy_coef = skill_entropy_coef
         self.skill_vocab_trainable = skill_vocab_trainable
         self.actor_trainable = actor_trainable
+        self.grid_search_skill_init = grid_search_skill_init
+        self.grid_search_skill_count = grid_search_skill_count
         
         self.obs_type = obs_type
         self.action_dim = action_shape[0]
@@ -168,6 +171,18 @@ class CICHRLAgent:
         
         self.train()
         
+        # If initializing skills with grid search, set up vars to store returns for each skill tested
+        if self.grid_search_skill_init:
+            assert self.grid_search_skill_count > self.skill_vocab_size, "grid search must check enough skills to initialize each skill in vocab"
+            
+            self.expl_steps_per_grid_skill = self.num_expl_steps // self.grid_search_skill_count
+            
+            self.grid_skills = (np.linspace(0, 1, self.grid_search_skill_count)[:, None] * np.ones(skill_dim)[None, :]).astype(np.float32)
+            self.expl_return_per_grid_skill = np.zeros(self.grid_search_skill_count)
+            
+            # Set up initial grid level
+            self.grid_skill_ind = 0
+        
     def train(self, training=True):
         self.training = training
         self.encoder.train(training)
@@ -184,7 +199,24 @@ class CICHRLAgent:
         return tuple()
     def init_meta(self, time_step=None):
         return OrderedDict()
-    def update_meta(self, meta, global_step, time_step, finetune=False):
+    def update_meta(self, meta, step, time_step, finetune=False):
+        # Since this gets called every step, we can use it to aggregate return information while testing
+        # different possible skill initializations
+        # meta is left unused
+        if self.grid_search_skill_init and step < self.expl_steps_per_grid_skill * self.grid_search_skill_count:
+            # Save reward for evaluating each grid skill
+            self.expl_return_per_grid_skill[self.grid_skill_ind] += time_step.reward
+            
+            # If grid sweep is finished, set skill vocab to the best-performing grid skills
+            if (step + 1) == self.expl_steps_per_grid_skill * self.grid_search_skill_count:
+                best_grid_skill_inds = np.argsort(-1 * self.expl_return_per_grid_skill)[:self.skill_vocab_size]
+                self.skill_selector.skill_vocab.data = torch.from_numpy(self.grid_skills[best_grid_skill_inds]).to(self.device)
+                print(f"Grid sweep done: top performing skills have means: {self.grid_skills[best_grid_skill_inds].mean(-1).tolist()}")
+        
+            # During search, update grid skill level periodically
+            elif (step + 1) % self.expl_steps_per_grid_skill == 0:
+                self.grid_skill_ind += 1
+        
         return meta
     
     def compute_action_dist(self, obs, skills, step):
@@ -200,7 +232,11 @@ class CICHRLAgent:
         obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
         obs = self.encoder(obs)
         
-        skills = self.skill_selector(obs)
+        # If performing grid search to initialize skills, manually set skill during expl steps
+        if self.grid_search_skill_init and step < self.expl_steps_per_grid_skill * self.grid_search_skill_count:
+            skills = torch.from_numpy(self.grid_skills[self.grid_skill_ind]).to(self.device).unsqueeze(0)
+        else:
+            skills = self.skill_selector(obs)
         dist = self.compute_action_dist(obs, skills, step)
         
         if eval_mode:
