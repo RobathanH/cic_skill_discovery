@@ -110,7 +110,8 @@ def compute_apt_reward(source, target, args):
 class CICAgent(DDPGAgent):
     # Contrastive Intrinsic Control (CIC)
     def __init__(self, update_skill_every_step, skill_dim, scale, 
-                    project_skill, rew_type, update_rep, temp, **kwargs):
+                    project_skill, rew_type, update_rep, temp, 
+                    finetune_grid_skill_count, **kwargs):
         self.temp = temp
         self.skill_dim = skill_dim
         self.update_skill_every_step = update_skill_every_step
@@ -132,15 +133,26 @@ class CICAgent(DDPGAgent):
                                                 lr=self.lr)
 
         self.cic.train()
+        
+        
+        # If finetuning, create vars to save reward for each skill tested in grid sweep
+        if not self.reward_free:
+            # Number of skills to try during exploration steps
+            self.finetune_grid_skill_count = finetune_grid_skill_count
+            self.expl_steps_per_grid_skill = self.num_expl_steps // self.finetune_grid_skill_count
+            
+            self.grid_skills = (np.linspace(0, 1, finetune_grid_skill_count)[:, None] * np.ones(skill_dim)[None, :]).astype(np.float32)
+            self.expl_return_per_grid_skill = np.zeros(finetune_grid_skill_count)
+            
+            # Set up initial grid level
+            self.grid_skill_ind = 0
 
     def get_meta_specs(self):
         return (specs.Array((self.skill_dim,), np.float32, 'skill'),)
 
     def init_meta(self):
         if not self.reward_free:
-            # selects mean skill of 0.5 (to select skill automatically use CEM or Grid Sweep
-            # procedures described in the CIC paper)
-            skill = np.ones(self.skill_dim).astype(np.float32) * 0.5
+            skill = self.grid_skills[self.grid_skill_ind]
         else:
             skill = np.random.uniform(0,1,self.skill_dim).astype(np.float32)
         meta = OrderedDict()
@@ -148,8 +160,27 @@ class CICAgent(DDPGAgent):
         return meta
 
     def update_meta(self, meta, step, time_step):
-        if step % self.update_skill_every_step == 0:
-            return self.init_meta()
+        if not self.reward_free:
+            # If pretraining, perform skill grid sweep during initial explore steps
+            if step < self.expl_steps_per_grid_skill * self.finetune_grid_skill_count:
+                # Save reward for evaluating each grid skill
+                self.expl_return_per_grid_skill[self.grid_skill_ind] += time_step.reward
+                
+                # If grid sweep is finished, set fixed grid skill based on max expl_return
+                if (step + 1) == self.expl_steps_per_grid_skill * self.finetune_grid_skill_count:
+                    self.grid_skill_ind = np.argmax(self.expl_return_per_grid_skill)
+                    print(f"Finetuning done: best skill has mean: {self.grid_skills[self.grid_skill_ind].mean()}")
+                    return self.init_meta()
+                
+                # Update grid skill level periodically
+                elif (step + 1) % self.expl_steps_per_grid_skill == 0:
+                    self.grid_skill_ind += 1
+                    return self.init_meta()
+            
+        else:
+            # If pretraining, periodically select random skill
+            if step % self.update_skill_every_step == 0:
+                return self.init_meta()
         return meta
 
     def compute_cpc_loss(self,obs,next_obs,skill):

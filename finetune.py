@@ -234,7 +234,7 @@ class Workspace:
         domain, _ = self.cfg.task.split('_', 1)
         
         # Special case for cic_hrl agent, which loads from pretrained cic
-        if self.cfg.agent.name == "cic_hrl":
+        if self.cfg.agent.name in ["cic_hrl", "cic"]:
             snapshot = snapshot_base_dir / self.cfg.obs_type / domain / "cic" / f"{domain}_pretrain" / f"snapshot_{self.cfg.snapshot_ts}_{domain}_pretrain.pt"
         else:
             snapshot_dir = snapshot_base_dir / self.cfg.obs_type / domain / self.cfg.agent.name
