@@ -251,8 +251,8 @@ class CICHRLAgent:
         metrics = dict()
 
         with torch.no_grad():
-            next_skill = self.skill_selector(obs)
-            next_action = self.compute_action_dist(obs, next_skill, step).sample(clip=self.stddev_clip)
+            next_skill = self.skill_selector(next_obs)
+            next_action = self.compute_action_dist(next_obs, next_skill, step).sample(clip=self.stddev_clip)
             target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
