@@ -1,4 +1,7 @@
 import hydra
+from dataclasses import dataclass
+from enum import Enum
+from typing import List
 import numpy as np
 import torch
 import torch.nn as nn
@@ -91,97 +94,99 @@ class SkillSelector(nn.Module):
         
         
 
+@dataclass
 class CICHRLAgent:
-    def __init__(self, name, skill_vocab_size, skill_dim,
-                 skill_entropy_coef, skill_selector_is_policy,
-                 skill_vocab_trainable, actor_trainable,
-                 grid_search_skill_init, grid_search_skill_count,
-                 obs_type, obs_shape, action_shape,
-                 device, lr,
-                 feature_dim, hidden_dim,
-                 pretrained_feature_dim, pretrained_hidden_dim,
-                 critic_target_tau,
-                 num_expl_steps, update_every_steps, stddev_schedule,
-                 nstep, batch_size, stddev_clip, use_tb, use_wandb):
-        self.skill_vocab_size = skill_vocab_size
-        self.skill_dim = skill_dim
-        self.skill_entropy_coef = skill_entropy_coef
-        self.skill_vocab_trainable = skill_vocab_trainable
-        self.actor_trainable = actor_trainable
-        self.grid_search_skill_init = grid_search_skill_init
-        self.grid_search_skill_count = grid_search_skill_count
-        
-        self.obs_type = obs_type
-        self.action_dim = action_shape[0]
-        self.hidden_dim = hidden_dim
-        self.lr = lr
-        self.device = device
-        self.critic_target_tau = critic_target_tau
-        self.update_every_steps = update_every_steps
-        self.use_tb = use_tb
-        self.use_wandb = use_wandb
-        self.num_expl_steps = num_expl_steps
-        self.stddev_schedule = stddev_schedule
-        self.stddev_clip = stddev_clip
-        self.feature_dim = feature_dim
-        self.solved_meta = None
+    name: str
+    skill_vocab_size: int
+    skill_entropy_coef: float
+    skill_selector_is_policy: bool
+    skill_vocab_trainable: bool
+    actor_trainable: bool
+    expl_skill_type: str
+    expl_skill_count: int
 
-        self.batch_size = batch_size
+    skill_dim: int
+    feature_dim: int
+    hidden_dim: int
+    pretrained_feature_dim: int
+    pretrained_hidden_dim: int
+    obs_type: str
+    obs_shape: List[int]
+    action_shape: List[int]
+    
+    num_expl_steps: int
+    lr: float
+    batch_size: int
+    critic_target_tau: float
+    update_every_steps: int
+    stddev_schedule: float
+    stddev_clip: float
+    nstep: int
+    device: str
+    
+    use_tb: bool
+    use_wandb: bool
+        
+    def __post_init__(self):
+        
+        self.action_dim = self.action_shape[0]
         
         # Compute obs_dim (potentially after encoder)
-        if obs_type == 'pixels':
+        if self.obs_type == 'pixels':
             self.aug = utils.RandomShiftsAug(pad=4)
-            self.encoder = Encoder(obs_shape).to(device)
+            self.encoder = Encoder(self.obs_shape).to(device)
             self.obs_dim = self.encoder.repr_dim
         else:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
-            self.obs_dim = obs_shape[0]
+            self.obs_dim = self.obs_shape[0]
         
         # High-Level skill vocab trainer and selection policy
-        self.skill_selector = SkillSelector(skill_vocab_size, skill_dim, obs_type,
-                                            self.obs_dim, feature_dim, hidden_dim,
-                                            skill_vocab_trainable, skill_selector_is_policy).to(device)
+        self.skill_selector = SkillSelector(self.skill_vocab_size, self.skill_dim, self.obs_type,
+                                            self.obs_dim, self.feature_dim, self.hidden_dim,
+                                            self.skill_vocab_trainable, self.skill_selector_is_policy).to(device)
         
         # Low-Level actor includes skill in input - this is what we load from pretraining
-        self.actor = Actor(obs_type, self.obs_dim + skill_dim, self.action_dim,
-                           pretrained_feature_dim, pretrained_hidden_dim).to(device)
+        self.actor = Actor(self.obs_type, self.obs_dim + self.skill_dim, self.action_dim,
+                           self.pretrained_feature_dim, self.pretrained_hidden_dim).to(device)
 
         # Critic operates on low-level observations and continuous actions, but no skill info
         # TODO: Compare difference with skill input as well
-        self.critic = Critic(obs_type, self.obs_dim, self.action_dim,
-                             feature_dim, hidden_dim).to(device)
-        self.critic_target = Critic(obs_type, self.obs_dim, self.action_dim,
-                                    feature_dim, hidden_dim).to(device)
+        self.critic = Critic(self.obs_type, self.obs_dim, self.action_dim,
+                             self.feature_dim, self.hidden_dim).to(device)
+        self.critic_target = Critic(self.obs_type, self.obs_dim, self.action_dim,
+                                    self.feature_dim, self.hidden_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
         # Optimizers
-        self.selector_opt = torch.optim.Adam(self.skill_selector.parameters(), lr=lr)
+        self.selector_opt = torch.optim.Adam(self.skill_selector.parameters(), lr=self.lr)
         
-        if obs_type == 'pixels':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=lr)
+        if self.obs_type == 'pixels':
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=self.lr)
         else:
             self.encoder_opt = None
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=lr)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=self.lr)
         
-        if actor_trainable:
-            self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=lr)
+        if self.actor_trainable:
+            self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=self.lr)
         else:
             self.actor_opt = None
         
         self.train()
         
-        # If initializing skills with grid search, set up vars to store returns for each skill tested
-        if self.grid_search_skill_init:
-            assert self.grid_search_skill_count > self.skill_vocab_size, "grid search must check enough skills to initialize each skill in vocab"
-            
-            self.expl_steps_per_grid_skill = self.num_expl_steps // self.grid_search_skill_count
-            
-            self.grid_skills = (np.linspace(0, 1, self.grid_search_skill_count)[:, None] * np.ones(skill_dim)[None, :]).astype(np.float32)
-            self.expl_return_per_grid_skill = np.zeros(self.grid_search_skill_count)
-            
-            # Set up initial grid level
-            self.grid_skill_ind = 0
+        # Test a set of skills during expl steps, then choose those with the best return to initialize skill vocab
+        assert self.expl_skill_count > self.skill_vocab_size, "skill expl search must check enough skills to initialize each skill in vocab"
+        
+        self.expl_steps_per_skill = self.num_expl_steps // self.expl_skill_count
+        self.return_per_expl_skill = np.zeros(self.expl_skill_count) # Sum rewards per expl skill
+        self.expl_skill_ind = 0 # Track current expl skill during expl steps
+        
+        if self.expl_skill_type == "grid":
+            self.expl_skills = (np.linspace(0, 1, self.expl_skill_count)[:, None] * np.ones(self.skill_dim)[None, :]).astype(np.float32)
+        elif self.expl_skill_type == "rand":
+            self.expl_skills = np.random.rand(self.expl_skill_count, self.skill_dim).astype(np.float32)
+        else:
+            raise ValueError(f"Unrecognized expl_skill_type: {self.expl_skill_type}")
         
     def train(self, training=True):
         self.training = training
@@ -203,19 +208,20 @@ class CICHRLAgent:
         # Since this gets called every step, we can use it to aggregate return information while testing
         # different possible skill initializations
         # meta is left unused
-        if self.grid_search_skill_init and step < self.expl_steps_per_grid_skill * self.grid_search_skill_count:
-            # Save reward for evaluating each grid skill
-            self.expl_return_per_grid_skill[self.grid_skill_ind] += time_step.reward
+                
+        if self.expl_skill_ind < self.expl_skill_count:
+            # Save reward for evaluating each expl skill
+            self.return_per_expl_skill[self.expl_skill_ind] += time_step.reward
             
-            # If grid sweep is finished, set skill vocab to the best-performing grid skills
-            if (step + 1) == self.expl_steps_per_grid_skill * self.grid_search_skill_count:
-                best_grid_skill_inds = np.argsort(-1 * self.expl_return_per_grid_skill)[:self.skill_vocab_size]
-                self.skill_selector.skill_vocab.data = torch.from_numpy(self.grid_skills[best_grid_skill_inds]).to(self.device)
-                print(f"Grid sweep done: top performing skills have means: {self.grid_skills[best_grid_skill_inds].mean(-1).tolist()}")
-        
-            # During search, update grid skill level periodically
-            elif (step + 1) % self.expl_steps_per_grid_skill == 0:
-                self.grid_skill_ind += 1
+            # Periodically update expl_skill
+            if (step + 1) % self.expl_steps_per_skill == 0:
+                self.expl_skill_ind += 1
+                
+                # If done with all expl_skills, choose the top options and initialize skill vocab
+                if self.expl_skill_ind == self.expl_skill_count:
+                    best_expl_skill_inds = np.argsort(-1 * self.return_per_expl_skill)[:self.skill_vocab_size]
+                    self.skill_selector.skill_vocab.data = torch.from_numpy(self.expl_skills[best_expl_skill_inds]).to(self.device)
+                    print(f"Expl skill sweep done: Best returns are {self.return_per_expl_skill[best_expl_skill_inds].tolist()}")
         
         return meta
     
@@ -232,9 +238,9 @@ class CICHRLAgent:
         obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
         obs = self.encoder(obs)
         
-        # If performing grid search to initialize skills, manually set skill during expl steps
-        if self.grid_search_skill_init and step < self.expl_steps_per_grid_skill * self.grid_search_skill_count:
-            skills = torch.from_numpy(self.grid_skills[self.grid_skill_ind]).to(self.device).unsqueeze(0)
+        # If we are still performing expl skill sweep, manually set skill
+        if self.expl_skill_ind < self.expl_skill_count:
+            skills = torch.from_numpy(self.expl_skills[self.expl_skill_ind]).to(self.device).unsqueeze(0)
         else:
             skills = self.skill_selector(obs)
         dist = self.compute_action_dist(obs, skills, step)

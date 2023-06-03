@@ -2,12 +2,12 @@
 _target_: agent.cic_hrl.CICHRLAgent
 name: cic_hrl
 skill_vocab_size: 1
-skill_entropy_coef: 1
+skill_entropy_coef: 0.01
 skill_selector_is_policy: true
 skill_vocab_trainable: true
 actor_trainable: false
-grid_search_skill_init: true
-grid_search_skill_count: 20
+expl_skill_type: grid # grid, rand
+expl_skill_count: 40 # must be greater than the skill_vocab_size
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
 action_shape: ??? # to be specified later
