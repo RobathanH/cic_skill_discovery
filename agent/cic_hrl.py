@@ -94,6 +94,16 @@ class SkillSelector(nn.Module):
         similarities *= (1 - torch.eye(n, device=device))
         mean_similarity = similarities.sum() / (n * (n - 1))
         return mean_similarity
+    
+    def compute_skill_vocab_distance(self):
+        """
+        Computes current average l2 distance between skill vectors
+        """
+        n = self.skill_vocab.size(0)
+        
+        dist = torch.linalg.norm(self.skill_vocab[:, None, :] - self.skill_vocab[None, :, :], dim=-1)
+        mean_dist = dist.sum() / (n * (n - 1))
+        return mean_dist
         
         
 
@@ -370,7 +380,9 @@ class CICHRLAgent:
             if self.skill_vocab_size > 1:
                 metrics["skill_selector_entropy"] = skill_entropy.item()
                 metrics["max_skill_prob"] = skill_probs.max(-1).values.mean().item()
+                metrics["skill_prob_range"] = (skill_probs.max(-1).values - skill_probs.min(-1).values).max().item()
                 metrics["skill_vocab_similarity"] = self.skill_selector.compute_skill_vocab_similarity().item()
+                metrics["skill_vocab_dist"] = self.skill_selector.compute_skill_vocab_distance().item()
 
         return metrics
     
