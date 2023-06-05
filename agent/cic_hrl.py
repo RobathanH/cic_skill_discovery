@@ -75,6 +75,9 @@ class SkillSelector(nn.Module):
         if return_logits:
             return logits
         
+        if len(self.skill_vocab) == 1:
+            return self.skill_vocab.expand(obs.size(0), -1)
+        
         dist = torch.distributions.Categorical(logits=logits)
         samples = dist.sample()
         skills = self.skill_vocab[samples]
@@ -104,6 +107,8 @@ class CICHRLAgent:
     actor_trainable: bool
     expl_skill_type: str
     expl_skill_count: int
+    init_critic: bool
+    init_critic_fixed_skill: bool
 
     skill_dim: int
     feature_dim: int
@@ -150,13 +155,21 @@ class CICHRLAgent:
         self.actor = Actor(self.obs_type, self.obs_dim + self.skill_dim, self.action_dim,
                            self.pretrained_feature_dim, self.pretrained_hidden_dim).to(device)
 
-        # Critic operates on low-level observations and continuous actions, but no skill info
-        # TODO: Compare difference with skill input as well
-        self.critic = Critic(self.obs_type, self.obs_dim, self.action_dim,
-                             self.feature_dim, self.hidden_dim).to(device)
-        self.critic_target = Critic(self.obs_type, self.obs_dim, self.action_dim,
-                                    self.feature_dim, self.hidden_dim).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+        if self.init_critic:
+            # Initialize from pretrained critic, which also takes skill as input
+            self.critic = Critic(self.obs_type, self.obs_dim + self.skill_dim, self.action_dim,
+                                self.feature_dim, self.hidden_dim).to(device)
+            self.critic_target = Critic(self.obs_type, self.obs_dim + self.skill_dim, self.action_dim,
+                                        self.feature_dim, self.hidden_dim).to(device)
+            self.critic_target.load_state_dict(self.critic.state_dict())
+            
+        else:
+            # Critic operates on low-level observations and continuous actions, but no skill info
+            self.critic = Critic(self.obs_type, self.obs_dim, self.action_dim,
+                                self.feature_dim, self.hidden_dim).to(device)
+            self.critic_target = Critic(self.obs_type, self.obs_dim, self.action_dim,
+                                        self.feature_dim, self.hidden_dim).to(device)
+            self.critic_target.load_state_dict(self.critic.state_dict())
         
         # Optimizers
         self.selector_opt = torch.optim.Adam(self.skill_selector.parameters(), lr=self.lr)
@@ -198,6 +211,9 @@ class CICHRLAgent:
     def init_from(self, other):
         utils.hard_update_params(other.encoder, self.encoder)
         utils.hard_update_params(other.actor, self.actor)
+        if self.init_critic:
+            utils.hard_update_params(other.critic, self.critic)
+            utils.hard_update_params(other.critic, self.critic_target)
             
     # Meta passed from trainer should always be empty
     def get_meta_specs(self):
@@ -259,11 +275,26 @@ class CICHRLAgent:
         with torch.no_grad():
             next_skill = self.skill_selector(next_obs)
             next_action = self.compute_action_dist(next_obs, next_skill, step).sample(clip=self.stddev_clip)
-            target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
+            if self.init_critic:
+                if self.init_critic_fixed_skill:
+                    critic_skill = 0.5 * torch.ones_like(next_skill, device=self.device)
+                else:
+                    critic_skill = next_skill
+                target_Q1, target_Q2 = self.critic_target(torch.cat([next_obs, critic_skill], dim=-1), next_action)
+            else:
+                target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
 
-        Q1, Q2 = self.critic(obs, action)
+        if self.init_critic:
+            if self.init_critic_fixed_skill:
+                critic_skill = 0.5 * torch.ones(obs.size(0), self.skill_dim, device=self.device)
+            else:
+                with torch.no_grad():
+                    critic_skill = self.skill_selector(obs)
+            Q1, Q2 = self.critic(torch.cat([obs, critic_skill], dim=-1), action)
+        else:
+            Q1, Q2 = self.critic(obs, action)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
 
         if self.use_tb or self.use_wandb:
@@ -301,8 +332,15 @@ class CICHRLAgent:
         skills = skills.flatten(end_dim=1)
         dist = self.compute_action_dist(obs, skills, step)
         action = dist.sample(clip=self.stddev_clip)
-        log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        Q1, Q2 = self.critic(obs, action)
+        
+        if self.init_critic:
+            if self.init_critic_fixed_skill:
+                critic_skill = 0.5 * torch.ones_like(skills, device=self.device)
+            else:
+                critic_skill = skills.detach()
+            Q1, Q2 = self.critic(torch.cat([obs, critic_skill], dim=-1), action)
+        else:
+            Q1, Q2 = self.critic(obs, action)
         Q = torch.min(Q1, Q2)
         Q = Q.reshape(-1, self.skill_vocab_size)
 
@@ -312,8 +350,9 @@ class CICHRLAgent:
         actor_loss = -Q.mean()
         
         # Add normalized skill entropy term
-        skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean() / math.log(self.skill_vocab_size)
-        actor_loss -= self.skill_entropy_coef * skill_entropy
+        if self.skill_vocab_size > 1:
+            skill_entropy = torch.distributions.Categorical(logits=selection_logits).entropy().mean() / math.log(self.skill_vocab_size)
+            actor_loss -= self.skill_entropy_coef * skill_entropy
 
         # optimize skill selector
         self.selector_opt.zero_grad(set_to_none=True)
@@ -326,11 +365,12 @@ class CICHRLAgent:
 
         if self.use_tb or self.use_wandb:
             metrics['actor_loss'] = actor_loss.item()
-            metrics['actor_logprob'] = log_prob.mean().item()
+            metrics['actor_logprob'] = dist.log_prob(action).sum(-1, keepdim=True).mean().item()
             metrics['actor_ent'] = dist.entropy().sum(dim=-1).mean().item()
-            metrics["skill_selector_entropy"] = skill_entropy.item()
-            metrics["max_skill_prob"] = skill_probs.max(-1).values.mean().item()
-            metrics["skill_vocab_similarity"] = self.skill_selector.compute_skill_vocab_similarity().item()
+            if self.skill_vocab_size > 1:
+                metrics["skill_selector_entropy"] = skill_entropy.item()
+                metrics["max_skill_prob"] = skill_probs.max(-1).values.mean().item()
+                metrics["skill_vocab_similarity"] = self.skill_selector.compute_skill_vocab_similarity().item()
 
         return metrics
     
