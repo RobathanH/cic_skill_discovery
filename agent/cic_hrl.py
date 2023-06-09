@@ -380,7 +380,7 @@ class CICHRLAgent:
             if self.skill_vocab_size > 1:
                 metrics["skill_selector_entropy"] = skill_entropy.item()
                 metrics["max_skill_prob"] = skill_probs.max(-1).values.mean().item()
-                metrics["skill_prob_range"] = (skill_probs.max(-1).values - skill_probs.min(-1).values).max().item()
+                metrics["skill_prob_range"] = (skill_probs.max(0).values - skill_probs.min(0).values).max().item()
                 metrics["skill_vocab_similarity"] = self.skill_selector.compute_skill_vocab_similarity().item()
                 metrics["skill_vocab_dist"] = self.skill_selector.compute_skill_vocab_distance().item()
 
