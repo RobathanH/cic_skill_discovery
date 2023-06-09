@@ -347,7 +347,7 @@ class CICHRLAgent:
             if self.init_critic_fixed_skill:
                 critic_skill = 0.5 * torch.ones_like(skills, device=self.device)
             else:
-                critic_skill = skills.detach()
+                critic_skill = skills
             Q1, Q2 = self.critic(torch.cat([obs, critic_skill], dim=-1), action)
         else:
             Q1, Q2 = self.critic(obs, action)
