@@ -9,7 +9,7 @@ actor_trainable: false
 expl_skill_type: grid # grid, rand
 expl_skill_count: 40 # must be greater than the skill_vocab_size
 init_critic: true
-init_critic_fixed_skill: true
+init_critic_fixed_skill: false
 
 obs_type: ??? # to be specified later
 obs_shape: ??? # to be specified later
