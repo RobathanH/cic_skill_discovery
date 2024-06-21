@@ -6,4 +6,6 @@ This project investigates alternate approaches to fine-tuning a frozen locomotio
 
 For more details see the [poster](skill_tuning_poster.pdf) or the [report](skill_tuning_report.pdf).
 
+![poster](skill_tuning_poster.svg)
+
 To install and run, follow the instructions laid out in the [original readme](original_readme.md). Additionally, [install.md](install.md) lists the steps I found to work when installing.
